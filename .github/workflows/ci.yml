@@ -1,0 +1,25 @@
+name: checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start complete stack from empty database
+        run: |
+          python3 scripts/init_env.py
+          docker compose -p delivery-ci up --build -d --wait
+          python3 scripts/demo.py
+      - name: Build and test against isolated PostgreSQL
+        run: docker compose --env-file .env.example -p delivery-ci run --build --rm test
+      - name: Lint and formatting
+        run: docker compose --env-file .env.example -p delivery-ci run --rm --no-deps test sh -c 'ruff check --no-cache . && ruff format --check --no-cache .'
+      - name: Logs on failure
+        if: failure()
+        run: docker compose --env-file .env.example -p delivery-ci logs --no-color
+      - name: Clean up ephemeral CI data
+        if: always()
+        run: docker compose --env-file .env.example -p delivery-ci --profile test down -v
