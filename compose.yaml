@@ -1,0 +1,83 @@
+name: delivery-lab
+
+x-database-env: &database-env
+  DB_HOST: postgres
+  DB_NAME: delivery
+  DB_USER: app
+  DB_PASSWORD: ${APP_DB_PASSWORD:?Run python3 scripts/init_env.py}
+
+services:
+  postgres:
+    image: postgres:17.11-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: delivery
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/init_env.py}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Run python3 scripts/init_env.py}
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=40"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/001_app_user.sql:/docker-entrypoint-initdb.d/001_app_user.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d delivery"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  migrate:
+    build:
+      context: .
+      target: app
+    environment: *database-env
+    command: ["python", "-m", "delivery.migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+      target: app
+    environment: *database-env
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 3s
+      timeout: 6s
+      retries: 20
+
+  test-db:
+    profiles: ["test"]
+    image: postgres:17.11-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+    environment:
+      POSTGRES_DB: delivery_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test-only
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U test -d delivery_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    environment:
+      DB_HOST: test-db
+      DB_NAME: delivery_test
+      DB_USER: test
+      DB_PASSWORD: test-only
+    depends_on:
+      test-db:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
