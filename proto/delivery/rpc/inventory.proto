@@ -1,0 +1,17 @@
+syntax = "proto3";
+package delivery.inventory;
+
+service Inventory {
+  rpc Reserve(ReserveRequest) returns (ReserveReply);
+  rpc Stock(StockRequest) returns (StockReply);
+}
+message ReserveRequest {
+  string order_id = 1;
+  string sku = 2;
+  int32 quantity = 3;
+}
+message ReserveReply {
+  string outcome = 1; // reserved, out_of_stock, unknown_sku
+}
+message StockRequest { string sku = 1; }
+message StockReply { string sku = 1; int32 available = 2; }

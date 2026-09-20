@@ -42,15 +42,16 @@ def test_repeated_creation(client):
     assert conflict.json() == {"error": "idempotency_key_conflict"}
 
 
-def test_insufficient_stock_rolls_back_and_key_can_be_retried(client):
+def test_rejection_is_durable_and_new_intent_needs_new_key(client):
     key = uuid4()
     response = create(client, quantity=101, key=key)
     assert response.status_code == 409
     with psycopg.connect(**database_options()) as conn:
-        assert conn.execute("SELECT count(*) AS n FROM orders").fetchone()["n"] == 0
+        assert conn.execute("SELECT status FROM orders").fetchone()["status"] == "rejected"
         assert conn.execute("SELECT available FROM inventory").fetchone()["available"] == 100
         conn.execute("UPDATE inventory SET available = 101")
-    assert create(client, quantity=101, key=key).status_code == 201
+    assert create(client, quantity=101, key=key).status_code == 409
+    assert create(client, quantity=101).status_code == 201
 
 
 @pytest.mark.parametrize("quantity", [0, -1, 10001, 1.5, "2", True])
@@ -67,7 +68,7 @@ def test_missing_key_unknown_sku_and_order(client):
         client.patch(f"/orders/{uuid4()}/status", json={"status": "completed"}).status_code == 404
     )
     with psycopg.connect(**database_options()) as conn:
-        assert conn.execute("SELECT count(*) AS n FROM orders").fetchone()["n"] == 0
+        assert conn.execute("SELECT status FROM orders").fetchone()["status"] == "rejected"
 
 
 def test_invalid_transition(client):
@@ -96,7 +97,50 @@ def test_concurrent_reservations_do_not_oversell(client):
     assert sorted(response.status_code for response in responses) == [201] * 5 + [409] * 3
     assert client.get("/inventory/demo-item").json()["available"] == 0
     with psycopg.connect(**database_options()) as conn:
-        assert conn.execute("SELECT count(*) AS n FROM orders").fetchone()["n"] == 5
+        assert (
+            conn.execute("SELECT count(*) AS n FROM orders WHERE status='reserved'").fetchone()["n"]
+            == 5
+        )
+        assert (
+            conn.execute("SELECT count(*) AS n FROM orders WHERE status='rejected'").fetchone()["n"]
+            == 3
+        )
+
+
+def test_lost_grpc_reply_recovers_without_second_reservation(client, inventory_service):
+    import grpc
+
+    grpc.channel_ready_future(client.app.state.inventory.channel).result(timeout=5)
+    inventory_service.delay_after_commit = 0.3
+    client.app.state.inventory.timeout = 0.1
+    key = uuid4()
+    response = create(client, key=key)
+    assert response.status_code == 504
+    with psycopg.connect(**database_options()) as conn:
+        order = conn.execute("SELECT * FROM orders").fetchone()
+        assert order["status"] == "pending"
+        assert conn.execute("SELECT available FROM inventory").fetchone()["available"] == 98
+    assert (
+        client.patch(f"/orders/{order['id']}/status", json={"status": "completed"}).status_code
+        == 409
+    )
+    inventory_service.delay_after_commit = 0
+    client.app.state.inventory.timeout = 1
+    repeated = create(client, key=key)
+    assert repeated.status_code == 200 and repeated.json()["id"] == str(order["id"])
+    assert client.get("/inventory/demo-item").json()["available"] == 98
+
+
+def test_websocket_snapshot_and_reconnect(client):
+    order = create(client).json()
+    path = f"/ws/orders/{order['id']}"
+    with client.websocket_connect(path) as ws:
+        assert ws.receive_json()["order"]["status"] == "reserved"
+        client.patch(f"/orders/{order['id']}/status", json={"status": "completed"})
+        ws.send_text("refresh")
+        assert ws.receive_json()["order"]["status"] == "completed"
+    with client.websocket_connect(path) as ws:
+        assert ws.receive_json()["order"]["status"] == "completed"
 
 
 def test_database_constraint_rejects_negative_stock(client):

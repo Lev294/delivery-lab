@@ -6,6 +6,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      COMPOSE_PROJECT_NAME: delivery-ci
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Start complete stack from empty database
@@ -17,6 +19,12 @@ jobs:
         run: docker compose --env-file .env.example -p delivery-ci run --build --rm test
       - name: Lint and formatting
         run: docker compose --env-file .env.example -p delivery-ci run --rm --no-deps test sh -c 'ruff check --no-cache . && ruff format --check --no-cache .'
+      - name: Generated contract and real network checks
+        run: |
+          docker compose run --rm --no-deps test python scripts/generate_rpc.py --check
+          docker compose run --rm --no-deps test python -m scripts.check_stack
+      - name: Controlled failures and recovery
+        run: python3 scripts/check_faults.py
       - name: Logs on failure
         if: failure()
         run: docker compose --env-file .env.example -p delivery-ci logs --no-color

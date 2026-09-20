@@ -9,11 +9,12 @@ RUN useradd --uid 10001 --create-home app
 COPY main.py ./
 COPY delivery ./delivery
 COPY migrations ./migrations
+COPY scripts ./scripts
+COPY proto ./proto
 
 FROM base AS test
 RUN uv sync --locked --no-install-project
 COPY tests ./tests
-COPY scripts ./scripts
 USER app
 CMD ["pytest", "-q", "-p", "no:cacheprovider"]
 

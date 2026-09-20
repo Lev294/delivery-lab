@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Delivery Lab</title>
+<style>
+body{font:16px system-ui;max-width:980px;margin:40px auto;padding:0 20px;background:#f4f6f8;color:#182433}
+section{background:white;padding:22px;border-radius:12px;margin:18px 0}button,input{font:inherit;padding:8px;margin:4px}
+button{cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}#connection{font-weight:bold}
+</style>
+<h1>Delivery Lab</h1><p>Заказ → резерв через gRPC → изменение статуса. <a href="/docs">API</a></p>
+<section><h2>Заказ</h2>
+<label>Количество <input id="quantity" type="number" min="1" max="10000" value="1"></label>
+<button id="new">Новый заказ</button><button id="retry">Повторить тот же запрос</button>
+<p>Ключ запроса: <code id="key">—</code></p><p>ID заказа: <code id="order">—</code></p>
+<button id="complete">Завершить</button><button id="read">Прочитать из primary</button>
+<button id="replica">Прочитать из replica</button><button id="stock">Остаток</button>
+<pre id="result">Ответ API появится здесь.</pre></section>
+<section><h2>WebSocket</h2><p id="connection">Нет подключения</p>
+<button id="connect">Подключить / переподключить</button><button id="disconnect">Отключить</button>
+<p>После обрыва клиент подключается заново и получает текущее состояние. История событий не воспроизводится.</p>
+<pre id="events"></pre></section>
+<script>
+let key, orderId, body, ws, reconnect=true, timer;
+const el=id=>document.getElementById(id);
+async function api(path, options={}) {
+ try {
+  const response=await fetch(path,options), raw=await response.text();let data;
+  try{data=JSON.parse(raw);}catch{data={message:raw.slice(0,300)};}
+  el('result').textContent=JSON.stringify({http:response.status,instance:response.headers.get('X-Instance-ID'),data},null,2);
+  return {response,data};
+ }catch(error){el('result').textContent='Ошибка соединения: '+error.message;return {response:{ok:false},data:{}};}
+}
+async function create(fresh) {
+ if(fresh){reconnect=false;clearTimeout(timer);ws?.close();orderId=null;el('order').textContent='—';key=crypto.randomUUID();body={sku:'demo-item',quantity:Number(el('quantity').value)};el('key').textContent=key;}
+ if(!key)return;
+ const {response,data}=await api('/orders',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify(body)});
+ if(response.ok){orderId=data.id;el('order').textContent=orderId;connect();}
+}
+function connect(){
+ if(!orderId)return;clearTimeout(timer);reconnect=true;
+ if(ws){ws.onclose=null;ws.close();}
+ const current=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/orders/${orderId}`);ws=current;
+ current.onopen=()=>el('connection').textContent='Подключено';
+ current.onmessage=e=>{el('events').textContent=(new Date().toLocaleTimeString()+' '+e.data+'\n'+el('events').textContent).slice(0,12000);};
+ current.onclose=()=>{el('connection').textContent='Соединение закрыто';if(reconnect)timer=setTimeout(connect,1500);};
+}
+el('new').onclick=()=>create(true);el('retry').onclick=()=>create(false);
+el('complete').onclick=()=>orderId&&api(`/orders/${orderId}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:'{"status":"completed"}'});
+el('read').onclick=()=>orderId&&api(`/orders/${orderId}`);
+el('replica').onclick=()=>orderId&&api(`/replica/orders/${orderId}`);
+el('stock').onclick=()=>api('/inventory/demo-item');el('connect').onclick=connect;
+el('disconnect').onclick=()=>{reconnect=false;clearTimeout(timer);ws?.close();};
+</script></html>

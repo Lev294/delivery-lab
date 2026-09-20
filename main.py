@@ -5,7 +5,7 @@ from fastapi import FastAPI, Path
 from delivery.api import configure_app
 from delivery.db import lifespan
 
-app = FastAPI(title="Delivery Lab", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Delivery Lab", version="1.0.0", lifespan=lifespan)
 configure_app(app)
 
 

@@ -14,10 +14,11 @@ services:
       POSTGRES_DB: delivery
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/init_env.py}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Run python3 scripts/init_env.py}
-    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=40"]
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=60", "-c", "wal_level=replica", "-c", "max_wal_senders=5", "-c", "wal_keep_size=256MB", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./infra/postgres/001_app_user.sql:/docker-entrypoint-initdb.d/001_app_user.sql:ro
+      - ./infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d delivery"]
       interval: 2s
@@ -34,21 +35,90 @@ services:
       postgres:
         condition: service_healthy
 
-  app:
-    build:
-      context: .
-      target: app
-    environment: *database-env
-    ports:
-      - "127.0.0.1:${APP_PORT:-8080}:8000"
+  configure-db:
+    image: postgres:17.11-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Run init_env.py}
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?Run init_env.py}
+    volumes:
+      - ./infra/postgres/configure-replication.sql:/opt/configure.sql:ro
+    command: ["psql", "-h", "postgres", "-U", "postgres", "-d", "delivery", "-v", "ON_ERROR_STOP=1", "-f", "/opt/configure.sql"]
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  replica:
+    build:
+      context: ./infra/postgres
+      dockerfile: replica.Dockerfile
+    environment:
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?Run init_env.py}
+    volumes:
+      - replica-data:/var/lib/postgresql/data
+    depends_on:
+      configure-db:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U app -d delivery"]
+      interval: 2s
+      timeout: 2s
+      retries: 40
+
+  inventory:
+    build:
+      context: .
+      target: app
+    environment:
+      <<: *database-env
+      INVENTORY_DELAY_SECONDS: ${INVENTORY_DELAY_SECONDS:-0}
+    command: ["python", "-m", "delivery.inventory"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "from delivery.inventory_client import InventoryClient; InventoryClient('127.0.0.1:50051').stock('demo-item')"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  app: &orders
+    hostname: orders-1
+    build:
+      context: .
+      target: app
+    environment:
+      <<: *database-env
+      INVENTORY_TARGET: inventory:50051
+      REPLICA_HOST: replica
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      inventory:
+        condition: service_healthy
+      replica:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
       interval: 3s
       timeout: 6s
       retries: 20
+
+  app2:
+    <<: *orders
+    hostname: orders-2
+
+  proxy:
+    image: haproxy:3.2-alpine@sha256:5961c68bc8a81c5124d0a98ab20f81b74717d6afe596e805977d9cf84c126222
+    volumes:
+      - ./infra/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+      - "127.0.0.1:${L4_PORT:-8081}:8081"
+    depends_on:
+      app:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
 
   test-db:
     profiles: ["test"]
@@ -81,3 +151,4 @@ services:
 
 volumes:
   postgres-data:
+  replica-data:
